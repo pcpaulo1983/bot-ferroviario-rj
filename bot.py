@@ -1,7 +1,19 @@
-
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
 import os
+import logging
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
+
+# LOGGING (IMPORTANTE)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TOKEN")
 
@@ -18,7 +30,9 @@ ramais = {
     }
 }
 
-async def start(update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("📩 /start recebido")
+
     teclado = [
         [InlineKeyboardButton("🚆 Ramal Japeri", callback_data="ramal_japeri")],
         [InlineKeyboardButton("🚆 Ramal Santa Cruz", callback_data="ramal_santacruz")]
@@ -30,7 +44,7 @@ async def start(update, context):
         parse_mode="Markdown"
     )
 
-async def botoes(update, context):
+async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
@@ -48,7 +62,7 @@ async def botoes(update, context):
         parse_mode="Markdown"
     )
 
-async def ver_alerta(update, context):
+async def ver_alerta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
@@ -60,7 +74,7 @@ async def ver_alerta(update, context):
         parse_mode="Markdown"
     )
 
-async def ver_status(update, context):
+async def ver_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
@@ -72,11 +86,17 @@ async def ver_status(update, context):
         parse_mode="Markdown"
     )
 
-app = ApplicationBuilder().token(TOKEN).build()
+def main():
+    logger.info("🤖 Bot Ferroviário RJ iniciado")
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(ver_alerta, pattern="^alerta_"))
-app.add_handler(CallbackQueryHandler(ver_status, pattern="^status_"))
-app.add_handler(CallbackQueryHandler(botoes, pattern="^ramal_"))
+    app = ApplicationBuilder().token(TOKEN).build()
 
-app.run_polling()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(ver_alerta, pattern="^alerta_"))
+    app.add_handler(CallbackQueryHandler(ver_status, pattern="^status_"))
+    app.add_handler(CallbackQueryHandler(botoes, pattern="^ramal_"))
+
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
