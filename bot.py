@@ -18,7 +18,11 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
-GROUP_ID = int(os.getenv("GROUP_ID", "0"))
+GROUP_ID_ENV = os.getenv("GROUP_ID")
+if not GROUP_ID_ENV:
+    raise RuntimeError("❌ GROUP_ID não definido nas variáveis do ambiente")
+
+GROUP_ID = int(GROUP_ID_ENV)
 
 
 logging.basicConfig(level=logging.INFO)
