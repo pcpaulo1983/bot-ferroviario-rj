@@ -18,7 +18,8 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
-GROUP_ID = int(os.getenv("GROUP_ID"))
+GROUP_ID = int(os.getenv("GROUP_ID", "0"))
+
 
 logging.basicConfig(level=logging.INFO)
 
