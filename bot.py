@@ -1,5 +1,7 @@
 import os
 import logging
+import asyncio
+import requests
 from datetime import datetime
 
 from telegram import (
@@ -18,20 +20,35 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
-GROUP_ID_ENV = os.getenv("GROUP_ID")
-if not GROUP_ID_ENV:
-    raise RuntimeError("❌ GROUP_ID não definido nas variáveis do ambiente")
-
-GROUP_ID = int(GROUP_ID_ENV)
-
+GROUP_ID = int(os.getenv("GROUP_ID"))
 
 logging.basicConfig(level=logging.INFO)
 
 # ================= DADOS =================
-ramais = {}        # ramal -> thread_id
-status_ramais = {} # ramal -> status
-alertas = {}       # ramal -> alerta
-mensagem_fixa = {} # ramal -> msg_id
+ramais = {}          # ramal -> thread_id
+status_ramais = {}   # ramal -> status
+alertas = {}         # ramal -> alerta
+mensagem_fixa = {}   # ramal -> msg_id
+
+# ================= PALAVRAS-CHAVE =================
+PALAVRAS_ALERTA = [
+    "interrompida", "interrompido", "paralisada", "paralisado",
+    "sem circulação", "atraso", "atrasos", "lentidão",
+    "operação parcial", "falha", "ocorrência", "pane", "manutenção"
+]
+
+PALAVRAS_NORMAL = [
+    "operação normal", "circulando normalmente",
+    "serviço normalizado", "circulação normal"
+]
+
+# ================= FONTES OFICIAIS =================
+FONTES = {
+    "supervia": "https://www.supervia.com.br/rss",
+    "metro rio": "https://www.metrorio.com.br/rss",
+    "vlt rio": "https://www.vltrio.com.br/rss",
+    "bondinho santa teresa": "https://www.rio.rj.gov.br/rss"
+}
 
 # ================= UTIL =================
 def normalizar(texto):
@@ -40,19 +57,23 @@ def normalizar(texto):
 def agora():
     return datetime.now().strftime("%d/%m %H:%M")
 
+def painel(ramal):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📍 Status", callback_data=f"status|{ramal}")],
+        [InlineKeyboardButton("🕒 Horários", callback_data=f"horarios|{ramal}")],
+        [InlineKeyboardButton("🚨 Alertas", callback_data=f"alerta|{ramal}")]
+    ])
+
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Bot Ferroviário RJ online!")
 
-# ================= DETECTAR TÓPICO =================
+# ================= DETECTAR TÓPICOS =================
 async def detectar_topico(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
-    if update.message.forum_topic_created:
+    if update.message and update.message.forum_topic_created:
         nome = update.message.forum_topic_created.name
-        thread_id = update.message.message_thread_id
         chave = normalizar(nome)
+        thread_id = update.message.message_thread_id
 
         ramais[chave] = thread_id
         status_ramais[chave] = "🟢 Operação normal"
@@ -60,27 +81,13 @@ async def detectar_topico(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             message_thread_id=thread_id,
-            text=(
-                f"🚆 **{nome} — Central Ferroviária**\n\n"
-                f"Status: {status_ramais[chave]}"
-            ),
+            text=f"🚆 **{nome} — Central Ferroviária**\n\nStatus: 🟢 Operação normal",
             reply_markup=painel(chave),
             parse_mode="Markdown"
         )
 
         mensagem_fixa[chave] = msg.message_id
-        await context.bot.pin_chat_message(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id
-        )
-
-# ================= PAINEL =================
-def painel(ramal):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📍 Status", callback_data=f"status|{ramal}")],
-        [InlineKeyboardButton("🕒 Horários", callback_data=f"horarios|{ramal}")],
-        [InlineKeyboardButton("🚨 Alertas", callback_data=f"alerta|{ramal}")]
-    ])
+        await context.bot.pin_chat_message(update.effective_chat.id, msg.message_id)
 
 # ================= BOTÕES =================
 async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,65 +97,80 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     acao, ramal = query.data.split("|")
 
     if acao == "status":
-        await query.message.reply_text(
-            f"📍 Status:\n{status_ramais.get(ramal)}"
-        )
+        await query.message.reply_text(f"📍 Status atual:\n{status_ramais.get(ramal)}")
 
     elif acao == "horarios":
         await query.message.reply_text(
-            "🕒 Intervalos:\nPico: 5–10 min\nNormal: 15 min\nÚltimo: 23:30"
+            "🕒 Horários médios:\n"
+            "Pico: 5–10 min\n"
+            "Normal: 10–15 min\n"
+            "Última viagem: ~23:30"
         )
 
     elif acao == "alerta":
-        await query.message.reply_text(
-            alertas.get(ramal, "🟢 Nenhum alerta ativo")
-        )
+        await query.message.reply_text(alertas.get(ramal, "🟢 Nenhum alerta ativo"))
 
-# ================= ALERTA MANUAL =================
-async def alerta_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        return await update.message.reply_text(
-            "Uso: /alerta ramal mensagem"
-        )
+# ================= BUSCA INTERNET =================
+def buscar_status_online(ramal):
+    for nome, url in FONTES.items():
+        if nome in ramal:
+            try:
+                r = requests.get(url, timeout=10)
+                texto = r.text.lower()
 
-    ramal = normalizar(context.args[0])
-    texto = " ".join(context.args[1:])
+                for p in PALAVRAS_ALERTA:
+                    if p in texto:
+                        return "🔴 Problema detectado", p
 
-    alertas[ramal] = (
-        f"🚨 **ALERTA — {ramal}**\n\n"
-        f"{texto}\n\n🕒 {agora()}"
-    )
+                for p in PALAVRAS_NORMAL:
+                    if p in texto:
+                        return "🟢 Operação normal", None
 
-    status_ramais[ramal] = "🔴 Alerta ativo"
+            except Exception as e:
+                logging.error(e)
 
-    thread = ramais.get(ramal)
-    if thread:
-        msg = await context.bot.send_message(
-            chat_id=GROUP_ID,
-            message_thread_id=thread,
-            text=alertas[ramal],
-            parse_mode="Markdown"
-        )
-        await context.bot.pin_chat_message(GROUP_ID, msg.message_id)
+    return None, None
 
-# ================= NORMALIZAR =================
-async def normalizado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ramal = normalizar(context.args[0])
-    alertas.pop(ramal, None)
-    status_ramais[ramal] = "🟢 Operação normal"
-    await update.message.reply_text(f"✅ {ramal} normalizado")
+# ================= ALERTA AUTOMÁTICO =================
+async def monitorar(context: ContextTypes.DEFAULT_TYPE):
+    for ramal, thread in ramais.items():
+        status, palavra = buscar_status_online(ramal)
+
+        if not status:
+            continue
+
+        if status != status_ramais.get(ramal):
+            status_ramais[ramal] = status
+
+            texto = (
+                f"🚨 **ALERTA AUTOMÁTICO — {ramal}**\n\n"
+                f"Status: {status}\n"
+                f"Motivo detectado: {palavra}\n\n"
+                f"🕒 {agora()}"
+            )
+
+            alertas[ramal] = texto
+
+            msg = await context.bot.send_message(
+                chat_id=GROUP_ID,
+                message_thread_id=thread,
+                text=texto,
+                parse_mode="Markdown"
+            )
+
+            await context.bot.pin_chat_message(GROUP_ID, msg.message_id)
 
 # ================= MAIN =================
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("alerta", alerta_cmd))
-    app.add_handler(CommandHandler("normalizado", normalizado))
     app.add_handler(CallbackQueryHandler(botoes))
     app.add_handler(
         MessageHandler(filters.StatusUpdate.FORUM_TOPIC_CREATED, detectar_topico)
     )
+
+    app.job_queue.run_repeating(monitorar, interval=300, first=30)
 
     app.run_polling()
 
