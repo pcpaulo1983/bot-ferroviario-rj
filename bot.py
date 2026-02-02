@@ -110,10 +110,11 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     acao, ramal = query.data.split("|")
+    ramal = normalizar(ramal)  # 🔥 ESSA LINHA É A CHAVE
 
     if acao == "status":
         await query.message.reply_text(
-            f"📍 Status atual:\n{status_ramais.get(ramal, 'Desconhecido')}"
+            f"📍 Status atual:\n{status_ramais.get(ramal, '🟢 Operação normal')}"
         )
 
     elif acao == "horarios":
@@ -128,6 +129,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             alertas.get(ramal, "🟢 Nenhum alerta ativo")
         )
+
 
 # ================= BUSCA ONLINE =================
 def buscar_status_online(ramal: str):
