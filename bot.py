@@ -1,7 +1,6 @@
 import os
 import logging
-import asyncio
-import requests
+import httpx
 from datetime import datetime
 
 from telegram import (
@@ -20,9 +19,17 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
-GROUP_ID = int(os.getenv("GROUP_ID"))
+GROUP_ID_ENV = os.getenv("GROUP_ID")
 
-logging.basicConfig(level=logging.INFO)
+if not TOKEN or not GROUP_ID_ENV:
+    raise RuntimeError("❌ TOKEN ou GROUP_ID não definidos no Railway")
+
+GROUP_ID = int(GROUP_ID_ENV)
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
 # ================= DADOS =================
 ramais = {}          # ramal -> thread_id
@@ -51,13 +58,13 @@ FONTES = {
 }
 
 # ================= UTIL =================
-def normalizar(texto):
+def normalizar(texto: str) -> str:
     return texto.lower().strip()
 
-def agora():
+def agora() -> str:
     return datetime.now().strftime("%d/%m %H:%M")
 
-def painel(ramal):
+def painel(ramal: str):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📍 Status", callback_data=f"status|{ramal}")],
         [InlineKeyboardButton("🕒 Horários", callback_data=f"horarios|{ramal}")],
@@ -70,24 +77,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= DETECTAR TÓPICOS =================
 async def detectar_topico(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message and update.message.forum_topic_created:
-        nome = update.message.forum_topic_created.name
-        chave = normalizar(nome)
-        thread_id = update.message.message_thread_id
+    if not update.message or not update.message.forum_topic_created:
+        return
 
-        ramais[chave] = thread_id
-        status_ramais[chave] = "🟢 Operação normal"
+    nome = update.message.forum_topic_created.name
+    chave = normalizar(nome)
+    thread_id = update.message.message_thread_id
 
-        msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            message_thread_id=thread_id,
-            text=f"🚆 **{nome} — Central Ferroviária**\n\nStatus: 🟢 Operação normal",
-            reply_markup=painel(chave),
-            parse_mode="Markdown"
-        )
+    ramais[chave] = thread_id
+    status_ramais[chave] = "🟢 Operação normal"
 
-        mensagem_fixa[chave] = msg.message_id
-        await context.bot.pin_chat_message(update.effective_chat.id, msg.message_id)
+    msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        message_thread_id=thread_id,
+        text=(
+            f"🚆 **{nome} — Central Ferroviária**\n\n"
+            f"Status: 🟢 Operação normal"
+        ),
+        reply_markup=painel(chave),
+        parse_mode="Markdown"
+    )
+
+    mensagem_fixa[chave] = msg.message_id
+    await context.bot.pin_chat_message(
+        chat_id=update.effective_chat.id,
+        message_id=msg.message_id
+    )
 
 # ================= BOTÕES =================
 async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,7 +112,9 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     acao, ramal = query.data.split("|")
 
     if acao == "status":
-        await query.message.reply_text(f"📍 Status atual:\n{status_ramais.get(ramal)}")
+        await query.message.reply_text(
+            f"📍 Status atual:\n{status_ramais.get(ramal, 'Desconhecido')}"
+        )
 
     elif acao == "horarios":
         await query.message.reply_text(
@@ -108,33 +125,37 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif acao == "alerta":
-        await query.message.reply_text(alertas.get(ramal, "🟢 Nenhum alerta ativo"))
+        await query.message.reply_text(
+            alertas.get(ramal, "🟢 Nenhum alerta ativo")
+        )
 
-# ================= BUSCA INTERNET =================
-def buscar_status_online(ramal):
+# ================= BUSCA ONLINE =================
+def buscar_status_online(ramal: str):
     for nome, url in FONTES.items():
         if nome in ramal:
             try:
-                r = requests.get(url, timeout=10)
-                texto = r.text.lower()
+                with httpx.Client(timeout=10) as client:
+                    resposta = client.get(url)
 
-                for p in PALAVRAS_ALERTA:
-                    if p in texto:
-                        return "🔴 Problema detectado", p
+                texto = resposta.text.lower()
 
-                for p in PALAVRAS_NORMAL:
-                    if p in texto:
+                for palavra in PALAVRAS_ALERTA:
+                    if palavra in texto:
+                        return "🔴 Problema detectado", palavra
+
+                for palavra in PALAVRAS_NORMAL:
+                    if palavra in texto:
                         return "🟢 Operação normal", None
 
             except Exception as e:
-                logging.error(e)
+                logging.error(f"Erro ao acessar {url}: {e}")
 
     return None, None
 
 # ================= ALERTA AUTOMÁTICO =================
 async def monitorar(context: ContextTypes.DEFAULT_TYPE):
-    for ramal, thread in ramais.items():
-        status, palavra = buscar_status_online(ramal)
+    for ramal, thread_id in ramais.items():
+        status, motivo = buscar_status_online(ramal)
 
         if not status:
             continue
@@ -145,7 +166,7 @@ async def monitorar(context: ContextTypes.DEFAULT_TYPE):
             texto = (
                 f"🚨 **ALERTA AUTOMÁTICO — {ramal}**\n\n"
                 f"Status: {status}\n"
-                f"Motivo detectado: {palavra}\n\n"
+                f"Motivo detectado: {motivo or 'não informado'}\n\n"
                 f"🕒 {agora()}"
             )
 
@@ -153,7 +174,7 @@ async def monitorar(context: ContextTypes.DEFAULT_TYPE):
 
             msg = await context.bot.send_message(
                 chat_id=GROUP_ID,
-                message_thread_id=thread,
+                message_thread_id=thread_id,
                 text=texto,
                 parse_mode="Markdown"
             )
@@ -170,7 +191,12 @@ def main():
         MessageHandler(filters.StatusUpdate.FORUM_TOPIC_CREATED, detectar_topico)
     )
 
-    app.job_queue.run_repeating(monitorar, interval=300, first=30)
+    # verifica status a cada 5 minutos
+    app.job_queue.run_repeating(
+        monitorar,
+        interval=300,
+        first=30
+    )
 
     app.run_polling()
 
