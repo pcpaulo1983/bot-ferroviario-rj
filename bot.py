@@ -134,8 +134,14 @@ def buscar_status_online(ramal: str):
     for nome, url in FONTES.items():
         if nome in ramal:
             try:
-                with httpx.Client(timeout=10) as client:
+                with httpx.Client(
+                    timeout=10,
+                    follow_redirects=True
+                ) as client:
                     resposta = client.get(url)
+
+                if resposta.status_code != 200:
+                    return None, None
 
                 texto = resposta.text.lower()
 
@@ -149,8 +155,10 @@ def buscar_status_online(ramal: str):
 
             except Exception as e:
                 logging.error(f"Erro ao acessar {url}: {e}")
+                return None, None
 
     return None, None
+
 
 # ================= ALERTA AUTOMÁTICO =================
 async def monitorar(context: ContextTypes.DEFAULT_TYPE):
